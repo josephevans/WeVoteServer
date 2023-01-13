@@ -76,7 +76,9 @@ def process_request(function, body, message):
 
 
 def worker_run(queue_url):
-    if queue_url.startswith('http://localhost'):
+    if any(txt in queue_url for txt in ['localhost', 'wevote-localstack']):
+        if 'wevote-localstack' in queue_url:
+            os.environ['LOCALSTACK_HOST'] = "wevote-localstack"
         try:
             import localstack_client.session as boto3
         except:

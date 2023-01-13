@@ -4,12 +4,15 @@
 DOCKER_API_NAME="wevote-api"
 DOCKER_DB_NAME="wevote-db"
 DOCKER_LOCALSTACK_NAME="wevote-localstack"
+DOCKER_WORKER_NAME="wevote-worker"
 DOCKER_API_TAG="${DOCKER_API_NAME}:latest"
+DOCKER_WORKER_TAG="${DOCKER_WORKER_NAME}:latest"
 DOCKER_DB_TAG="${DOCKER_DB_NAME}:latest"
 DOCKER_LOCALSTACK_TAG="localstack/localstack"
 DOCKER_NETWORK="wevote"
 DOCKER_DB_VOLUME="wevote-postgres-data"
 DB_NAME="wevotedb"
+ALL_CONTAINERS="$DOCKER_API_NAME $DOCKER_WORKER_NAME $DOCKER_DB_NAME $DOCKER_LOCALSTACK_NAME"
 
 set -e
 
@@ -30,19 +33,17 @@ usage() {
 	echo "                 except for database storage volume."
 	echo "    deletedb   - Removes database storage volume (docker volume.) "
 	echo "                 WARNING: this permanetly removes all wevote database data!"
-	echo "    localstack - Creates and starts localstack container (only needed"
-	echo "                 when local SQS testing or other advanced uses.)"
 	exit 1
 }
 
 
 which docker >/dev/null 2>&1
 if [ $? -ne 0 ]; then
-       echo "ERROR: You must have docker installed on your system."
-       echo ""
-       echo "Please see https://docs.docker.com/get-docker/ for installation instructions."
-       echo ""
-       exit 1
+	echo "ERROR: You must have docker installed on your system."
+	echo ""
+	echo "Please see https://docs.docker.com/get-docker/ for installation instructions."
+	echo ""
+	exit 1
 fi
 
 
@@ -67,6 +68,13 @@ start_wevote_localstack() {
 		docker run --network=$DOCKER_NETWORK \
 			-d --name=$DOCKER_LOCALSTACK_NAME \
 			$DOCKER_LOCALSTACK_TAG
+		echo "Waiting for localstack container to start..."
+		sleep 15
+		echo "Creating test SQS queue.."
+		docker exec $DOCKER_LOCALSTACK_NAME awslocal sqs create-queue \
+			--queue-name job-queue.fifo --attributes \
+			FifoQueue=true,ContentBasedDeduplication=true ||
+		echo "SQS queue created.."
 	else
 		if [ -z "$(docker ps | grep $DOCKER_LOCALSTACK_NAME)" ]; then
 			echo "Starting localstack container..."
@@ -94,7 +102,7 @@ start_wevote_db() {
 
 		# create dev database (sleep to make sure pg is started)
 		echo "Waiting for postgres container to start..."
-		sleep 3
+		sleep 15
 		echo "Creating wevote db ($DB_NAME)..."
 		docker exec $DOCKER_DB_NAME psql -U postgres -c "CREATE DATABASE $DB_NAME" || true
 	else
@@ -103,6 +111,26 @@ start_wevote_db() {
 			docker start $DOCKER_DB_NAME
 		fi
 	fi
+}
+
+start_wevote_api_worker() {
+	if [ -z "$(docker container ls -a | grep $DOCKER_WORKER_NAME)" ]; then
+		echo "Starting WeVote API SQS worker container.."
+		docker run --network=$DOCKER_NETWORK \
+			-d --name=$DOCKER_WORKER_NAME \
+			-v $BASEDIR:/wevote \
+			$DOCKER_WORKER_TAG
+	else
+		if [ -z "$(docker ps | grep $DOCKER_WORKER_NAME)" ]; then
+			echo "Starting WeVote API SQS worker container..."
+			docker start $DOCKER_WORKER_NAME
+		fi
+	fi
+}
+
+build_wevote_api_worker() {
+	# build API docker container
+	docker build -t $DOCKER_WORKER_TAG -f docker/Dockerfile.api-worker $BASEDIR
 }
 
 build_wevote_api() {
@@ -130,7 +158,7 @@ run_wevote_api() {
 
 stop_all() {
 	echo "Stopping any running WeVote API containers.."
-	for container in $DOCKER_API_NAME $DOCKER_DB_NAME $DOCKER_LOCALSTACK_NAME; do
+	for container in $ALL_CONTAINERS; do
 		if [ ! -z "$(docker ps | grep $container)" ]; then
 			docker stop $container
 		fi
@@ -138,7 +166,7 @@ stop_all() {
 }
 remove_all() {
 	echo "Removing WeVote API containers.."
-	for container in $DOCKER_API_NAME $DOCKER_DB_NAME $DOCKER_LOCALSTACK_NAME; do
+	for container in $ALL_CONTAINERS; do
 		docker rm $container 2>/dev/null || true
 	done
 	echo "Removing wevote docker network.."
@@ -148,11 +176,11 @@ remove_all() {
 if [ "$CMD" = "start" ]; then
 	create_wevote_docker_network
 	start_wevote_db
-	build_wevote_api
-	run_wevote_api
-elif [ "$CMD" = "localstack" ]; then
-	create_wevote_docker_network
 	start_wevote_localstack
+	build_wevote_api
+	build_wevote_api_worker
+	start_wevote_api_worker
+	run_wevote_api
 elif [ "$CMD" = "stop" ]; then
 	stop_all
 elif [ "$CMD" = "delete" ]; then
